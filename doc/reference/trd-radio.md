@@ -85,7 +85,7 @@ turn it on/off and configure it.
                   -> ReturnCode;
     fn reset(&self) -> ReturnCode;
     fn start(&self) -> ReturnCode;
-    fn stop(&self) -> ReturnCode;
+    fn stop(&self, allow_cancel: bool) -> ReturnCode;
 
     fn is_on(&self) -> bool;
     fn busy(&self) -> bool;
@@ -118,12 +118,13 @@ radio cannot be started or SUCCESS if it will be started. If the radio
 is already started (or in the process), `start` MUST return FAIL. I.e.,
 if software calls `start` twice, the second call would return FAIL.
 Software can tell when the radio has completed initialization by
-caling `started`.
+caling `is_on`.
 
-The `stop` function returns the radio to a low-power state. The
-function returns SUCCESS if the radio will transition to a
-low-power state and FAIL if it will not. Software can tell when the
-radio has turned off by calling `started`.
+The `stop` function returns the radio to a low-power state. The function
+returns SUCCESS if the radio will transition to a low-power state and FAIL if
+it will not. Software can tell when the radio has turned off by calling
+`is_on`. `stop` takes an additional `allow_cancel` flag; if true, the radio MAY
+abort going into sleep mode and return ECANCEL to the power client.
 
 The `is_on` function returns whether the radio is in a powered-on
 state. If the radio is on and can send/receive packets, it MUST return
@@ -312,17 +313,23 @@ indicate another failure.
         fn config_done(&self, result: ReturnCode);
     }
 
-The `changed` callback indicates that the power state of the radio
-has changed. The `on` parameter states whether it is now on or off.
-If a call to `stop` using the RadioConfig interface returns SUCCESS,
-the radio MUST issue a `changed` callback when the radio is powered
-off, passing `false` as the value of the `on` parameter. If a
-call to `start` using the RadioConfig interface returns SUCCESS,
-the radio MUST issue a `changed` callback when the radio is powered
-on, passing `true` as the value of the `on` parameter.
+The `changed` callback indicates that the power state of the radio has changed.
+The `on` parameter states whether it is now on or off and the `result`
+parameter indicates the status of the power change. If a call to `stop` using
+the RadioConfig interface returns SUCCESS and `allow_cancel` was passed as
+`false`, the radio MUST issue a `changed` callback when the radio is powered
+off, passing `false` as the value of the `on` parameter and SUCCESS as the
+value of `result`. If `stop` returns SUCCESS when called with `allow_cancel`
+set to `true`, the radio MUST issue a `changed` callback with `on` set to
+`false` and `result` to SUCCESS if the radio is powered off or a `changed`
+callback with `on` set to `true` and `result` to ECANCEL if the power off was
+aborted for some reason (e.g. late frame reception).  If a call to `start`
+using the RadioConfig interface returns SUCCESS, the radio MUST issue a
+`changed` callback when the radio is powered on, passing `true` as the value of
+the `on` parameter and SUCCESS for the `result` parameter.
 
     pub trait PowerClient {
-        fn changed(&self, on: bool);
+        fn changed(&self, on: bool, result: ReturnCode);
     }
 
 The return value of `is_on` MUST be consistent with the state as

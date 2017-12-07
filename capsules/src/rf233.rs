@@ -184,8 +184,8 @@ pub struct RF233<'a, S: spi::SpiMasterDevice + 'a> {
     interrupt_pending: Cell<bool>,
     config_pending: Cell<bool>,
     sleep_pending: Cell<bool>,
+    sleep_cancel: Cell<bool>,
     wake_pending: Cell<bool>,
-    power_client_pending: Cell<bool>,
     reset_pin: &'a gpio::Pin,
     sleep_pin: &'a gpio::Pin,
     irq_pin: &'a gpio::Pin,
@@ -354,15 +354,15 @@ impl<'a, S: spi::SpiMasterDevice + 'a> spi::SpiMasterClient for RF233<'a, S> {
             }
         }
 
+        let mut power_client_pending = false;
         // No matter what, if the READY state is reached, the radio is on. This
         // needs to occur before handling the interrupt below.
         if self.state.get() == InternalState::READY {
             self.wake_pending.set(false);
 
-            // If we just woke up, note that we need to call the PowerClient
-            if !self.radio_on.get() {
-                self.power_client_pending.set(true);
-            }
+            // If we just woke up, note that we need to call the PowerClient. Same thing if we just
+            // cancelled a SLEEP.
+            power_client_pending = !self.radio_on.get() || self.sleep_cancel.get();
             self.radio_on.set(true);
         }
 
@@ -396,6 +396,18 @@ impl<'a, S: spi::SpiMasterDevice + 'a> spi::SpiMasterClient for RF233<'a, S> {
         match self.state.get() {
             // Default on state; wait for transmit() call or receive interrupt
             InternalState::READY => {
+                if power_client_pending {
+                    let power_result: ReturnCode;
+                    if self.sleep_cancel.get() {
+                        power_result = ReturnCode::ECANCEL;
+                    } else {
+                        power_result = ReturnCode::SUCCESS;
+                    }
+
+                    self.sleep_cancel.set(false);
+                    self.power_client.get().map(|p| { p.changed(self.radio_on.get(), power_result); });
+                }
+
                 // If stop() was called, start turning off the radio.
                 if self.sleep_pending.get() {
                     self.sleep_pending.set(false);
@@ -403,10 +415,6 @@ impl<'a, S: spi::SpiMasterDevice + 'a> spi::SpiMasterClient for RF233<'a, S> {
                     self.state_transition_write(RF233Register::TRX_STATE,
                                                 RF233TrxCmd::OFF as u8,
                                                 InternalState::SLEEP_TRX_OFF);
-                } else if self.power_client_pending.get() {
-                    // fixes bug where client would start transmitting before this state completed
-                    self.power_client_pending.set(false);
-                    self.power_client.get().map(|p| { p.changed(self.radio_on.get()); });
                 }
             }
             // Starting state, begin start sequence.
@@ -577,16 +585,16 @@ impl<'a, S: spi::SpiMasterDevice + 'a> spi::SpiMasterClient for RF233<'a, S> {
             InternalState::SLEEP_TRX_OFF => {
                 // Toggle the sleep pin to put the radio into sleep mode
                 self.sleep_pin.set();
+                self.sleep_cancel.set(false);
+                self.power_client.get().map(|p| { p.changed(self.radio_on.get(), ReturnCode::SUCCESS); });
 
                 // If start() was called while we were shutting down,
                 // immediately start turning the radio back on
                 if self.wake_pending.get() {
                     self.state_transition_read(RF233Register::TRX_STATUS,
                                                InternalState::SLEEP_WAKE);
-                    // Inform power client that the radio turned off successfully
                 } else {
                     self.state.set(InternalState::SLEEP);
-                    self.power_client.get().map(|p| { p.changed(self.radio_on.get()); });
                 }
             }
             // Do nothing; a call to start() is required to restart radio
@@ -739,12 +747,11 @@ impl<'a, S: spi::SpiMasterDevice + 'a> spi::SpiMasterClient for RF233<'a, S> {
                 let crc_valid = result & PHY_RSSI_RX_CRC_VALID != 0;
                 self.receiving.set(false);
 
-                // Stay awake if we receive a packet, another call to stop()
-                // is therefore necessary to shut down the radio. Currently
-                // mainly benefits the XMAC wrapper that would like to avoid
-                // a shutdown when in the expected case the radio should stay
-                // awake.
-                self.sleep_pending.set(false);
+                // Abort going to SLEEP when we've received a packet if allowed by
+                // stop() call.
+                if self.sleep_pending.get() && self.sleep_cancel.get() {
+                    self.sleep_pending.set(false);
+                }
 
                 // Just read a packet: if a transmission is pending,
                 // start the transmission state machine
@@ -867,8 +874,8 @@ impl<'a, S: spi::SpiMasterDevice + 'a> RF233<'a, S> {
             interrupt_pending: Cell::new(false),
             config_pending: Cell::new(false),
             sleep_pending: Cell::new(false),
+            sleep_cancel: Cell::new(false),
             wake_pending: Cell::new(false),
-            power_client_pending: Cell::new(false),
             tx_buf: TakeCell::empty(),
             rx_buf: TakeCell::empty(),
             tx_len: Cell::new(0),
@@ -1016,7 +1023,7 @@ impl<'a, S: spi::SpiMasterDevice + 'a> radio::RadioConfig for RF233<'a, S> {
         ReturnCode::SUCCESS
     }
 
-    fn stop(&self) -> ReturnCode {
+    fn stop(&self, allow_cancel: bool) -> ReturnCode {
         if self.state.get() == InternalState::SLEEP ||
            self.state.get() == InternalState::SLEEP_TRX_OFF {
             return ReturnCode::EALREADY;
@@ -1031,6 +1038,9 @@ impl<'a, S: spi::SpiMasterDevice + 'a> radio::RadioConfig for RF233<'a, S> {
                                             InternalState::SLEEP_TRX_OFF);
             }
             _ => {
+                // If the radio is receiving a packet, allow the option to cancel
+                // sleep and remain awake.
+                self.sleep_cancel.set(allow_cancel);
                 self.sleep_pending.set(true);
             }
         }
