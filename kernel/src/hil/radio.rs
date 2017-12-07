@@ -25,7 +25,7 @@ pub trait ConfigClient {
 }
 
 pub trait PowerClient {
-    fn changed(&self, on: bool);
+    fn changed(&self, on: bool, result: ReturnCode);
 }
 
 /// These constants are used for interacting with the SPI buffer, which contains
@@ -69,7 +69,7 @@ pub trait RadioConfig {
                   -> ReturnCode;
     fn reset(&self) -> ReturnCode;
     fn start(&self) -> ReturnCode;
-    fn stop(&self) -> ReturnCode;
+    fn stop(&self, allow_cancel: bool) -> ReturnCode;
     fn is_on(&self) -> bool;
     fn busy(&self) -> bool;
 
