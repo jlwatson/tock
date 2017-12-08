@@ -183,6 +183,7 @@ pub struct RF233<'a, S: spi::SpiMasterDevice + 'a> {
     interrupt_handling: Cell<bool>,
     interrupt_pending: Cell<bool>,
     config_pending: Cell<bool>,
+    power_client_pending: Cell<bool>,
     sleep_pending: Cell<bool>,
     sleep_cancel: Cell<bool>,
     wake_pending: Cell<bool>,
@@ -354,7 +355,6 @@ impl<'a, S: spi::SpiMasterDevice + 'a> spi::SpiMasterClient for RF233<'a, S> {
             }
         }
 
-        let mut power_client_pending = false;
         // No matter what, if the READY state is reached, the radio is on. This
         // needs to occur before handling the interrupt below.
         if self.state.get() == InternalState::READY {
@@ -362,7 +362,7 @@ impl<'a, S: spi::SpiMasterDevice + 'a> spi::SpiMasterClient for RF233<'a, S> {
 
             // If we just woke up, note that we need to call the PowerClient. Same thing if we just
             // cancelled a SLEEP.
-            power_client_pending = !self.radio_on.get() || self.sleep_cancel.get();
+            self.power_client_pending.set(!self.radio_on.get() || self.sleep_cancel.get());
             self.radio_on.set(true);
         }
 
@@ -396,7 +396,9 @@ impl<'a, S: spi::SpiMasterDevice + 'a> spi::SpiMasterClient for RF233<'a, S> {
         match self.state.get() {
             // Default on state; wait for transmit() call or receive interrupt
             InternalState::READY => {
-                if power_client_pending {
+                if self.power_client_pending.get() {
+                    self.power_client_pending.set(false);
+
                     let power_result: ReturnCode;
                     if self.sleep_cancel.get() {
                         power_result = ReturnCode::ECANCEL;
@@ -873,6 +875,7 @@ impl<'a, S: spi::SpiMasterDevice + 'a> RF233<'a, S> {
             interrupt_handling: Cell::new(false),
             interrupt_pending: Cell::new(false),
             config_pending: Cell::new(false),
+            power_client_pending: Cell::new(false),
             sleep_pending: Cell::new(false),
             sleep_cancel: Cell::new(false),
             wake_pending: Cell::new(false),
