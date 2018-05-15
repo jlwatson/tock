@@ -29,6 +29,8 @@ use kernel::hil::symmetric_encryption;
 use kernel::hil::symmetric_encryption::{AES128, AES128CCM};
 use kernel::hil::Controller;
 
+const IS_TX: bool = true; // false == receiver
+
 /// Support routines for debugging I/O.
 ///
 /// Note: Use of this module will trample any other USART3 configuration.
@@ -258,6 +260,15 @@ pub unsafe fn reset_handler() {
     );
     hil::uart::UART::set_client(&sam4l::usart::USART3, console);
     console.initialize();
+
+    sam4l::gpio::PC[31].enable_output();
+    sam4l::gpio::PC[31].clear();
+
+    kernel::debug::assign_gpios(
+        Some(&sam4l::gpio::PC[31]),
+        None,
+        None,
+    );
 
     // Attach the kernel debug interface to this console
     let kc = static_init!(capsules::console::App, capsules::console::App::default());
@@ -556,8 +567,16 @@ pub unsafe fn reset_handler() {
     mac_device.set_device_procedure(radio_driver);
     radio_mac.set_transmit_client(radio_driver);
     radio_mac.set_receive_client(radio_driver);
-    radio_mac.set_pan(0xABCD);
-    radio_mac.set_address(0x1008);
+
+    radio_mac.set_pan(0x0000);
+    if IS_TX {
+        radio_mac.set_address_long([0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17]);
+    } else {
+        radio_mac.set_address_long([0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f]);
+    }
+
+    let ipv6_lowpan_test = ipv6_lowpan_test::initialize_all(radio_mac as &'static MacDevice, mux_alarm as &'static MuxAlarm<'static, sam4l::ast::Ast>);
+    radio_mac.set_transmit_client(ipv6_lowpan_test);
 
     // Configure the USB controller
     let usb_client = static_init!(
@@ -651,6 +670,10 @@ pub unsafe fn reset_handler() {
         &mut PROCESSES,
         FAULT_RESPONSE,
     );
+
+    if IS_TX {
+        ipv6_lowpan_test.start();
+    }
 
     kernel::main(&imix, &mut chip, &mut PROCESSES, &imix.ipc);
 }
